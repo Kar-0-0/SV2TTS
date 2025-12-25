@@ -1,9 +1,8 @@
 import torch 
-import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
 import os
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import random
 from pathlib import Path
 from speaker_encoder import SpeakerEncoder, GE2ELoss
@@ -15,15 +14,13 @@ n_mels = 40
 win_length = int(0.025 * sample_rate)
 hop_length= int(0.010 * sample_rate)
 n_fft = 512
-batch_size = 32
-num_workers = 2
 hidden_channels = 768
 lstm_layers = 3
 n_emb = 256
-epochs = 100
-n_speakers = 64
+epochs = 100_000
+n_speakers = 32
 n_utter = 10
-learning_rate = 1e-3
+learning_rate = 1e-4
 
 
 # load data
@@ -173,30 +170,80 @@ model = SpeakerEncoder(
 )
 
 loss_fn = GE2ELoss()
-optimizer = torch.optim.Adam(model.parameters(), learning_rate)
 
-# device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+optimizer = torch.optim.Adam([
+    {'params': model.parameters(), 'lr': 1e-3},
+    {'params': loss_fn.parameters(), 'lr': 1e-3}  # Changed from 1e-2 to 1e-3
+])
+
 device = torch.device('cpu')
 
+def verify_speakers(model, audio1_path, audio2_path, threshold=0.7):
+    model.eval()
+    with torch.no_grad():
+        # Load and convert both audio files
+        mel1 = wav_to_mel(audio1_path, sample_rate, n_mels, win_length, hop_length, n_fft)
+        mel2 = wav_to_mel(audio2_path, sample_rate, n_mels, win_length, hop_length, n_fft)
+        
+        # Check if files loaded successfully
+        if mel1 is None or mel2 is None:
+            print("Error: Could not load one or both audio files")
+            return False
+        
+        # Adjust length and prepare
+        mel1 = dataset._adjust_length(mel1).T.unsqueeze(0)  # [1, 160, 40]
+        mel2 = dataset._adjust_length(mel2).T.unsqueeze(0)  # [1, 160, 40]
+        
+        # Get embeddings
+        emb1 = model(mel1)  # [1, 256]
+        emb2 = model(mel2)  # [1, 256]
+        
+        # Compute cosine similarity
+        similarity = F.cosine_similarity(emb1, emb2).item()
+        
+        print(f"Similarity: {similarity:.4f}")
+        return similarity > threshold
+    
+model.train()
 for epoch in range(epochs):
     x_batch = dataset.sample_batch(n_speakers, n_utter)  # [64, 10, 160, 40]
     x_batch = x_batch.to(device)
     
-    # Reshape to process all utterances through model
-    N, M, T, F = n_speakers, n_utter, 160, n_mels
-    x_batch = x_batch.view(N * M, T, F) 
+    N, M, T, Z = x_batch.shape
+    x_batch = x_batch.view(N * M, T, Z) 
     
     embeddings = model(x_batch)  # [640, 256]
-    embeddings = embeddings.view(1, N, M, -1)
+    embeddings = embeddings.view(N, M, -1)
+    
     loss = loss_fn(embeddings)
     
     optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+    torch.nn.utils.clip_grad_norm_(loss_fn.parameters(), max_norm=1.0)
     optimizer.step()
-    
-    if epoch % 10 == 0:
-        print(f"Epoch {epoch}: {loss.item():.4f}")
 
+    if epoch % 100 == 0:
+        print(f"Step {epoch}: Loss {loss.item():.4f}, w={loss_fn.w.item():.2f}, b={loss_fn.b.item():.2f}\n------------------------")
+        with torch.no_grad():
+            emb_norm = torch.norm(embeddings, dim=-1).mean()
+            emb_std = embeddings.std()
+            print(f"  Embedding norm: {emb_norm:.4f}, std: {emb_std:.4f}")
 
+        # Test with same speaker
+        same_speaker = verify_speakers(model, 'data/wav/id11245/1iOMOrqGesE/00004.wav', 
+                                            'data/wav/id11245/1iOMOrqGesE/00005.wav')
+        print(f"Same speaker: {same_speaker}")
+
+        # Test with different speakers
+        diff_speaker = verify_speakers(model, 'data/wav/id11245/1iOMOrqGesE/00005.wav',
+                                            'data/wav/id11248/_U-p_z1WI2E/00001.wav')
+        print(f"Different speaker: {diff_speaker}")
+        print("------------------------")    
+        model.train()
+    if epoch % 5000 == 0 and epoch > 0:
+        torch.save(model.state_dict(), f'checkpoint_step{epoch}.pth')
+
+torch.save(model.state_dict(), f'se_step_final.pth')
 
 
