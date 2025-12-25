@@ -20,47 +20,47 @@ class SpeakerEncoder(nn.Module):
 class GE2ELoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.w = nn.Parameter(torch.tensor(10.0))
-        self.b = nn.Parameter(torch.tensor(-5.0))
+        self.w = nn.Parameter(torch.tensor(15.0))
+        self.b = nn.Parameter(torch.tensor(-7.0))
     
     def forward(self, x):
-        B, N, M, D = x.shape
+        # x: (N, M, D) - N speakers, M utterances, D embedding dim
+        N, M, D = x.shape
         
-        # Flatten to (B, N*M, D)
-        x_flat = x.view(B, N * M, D)
-        x_flat = F.normalize(x_flat, p=2, dim=-1)  # L2 normalize
+        # Normalize embeddings
+        x = F.normalize(x, p=2, dim=-1)
         
-        centroids_full = torch.mean(x, dim=2)
-        centroids_full = F.normalize(centroids_full, p=2, dim=-1)
+        # Compute centroids including all utterances: (N, D)
+        centroids_incl = torch.mean(x, dim=1)
         
-        # Expand to (B, N, M, D)
-        centroids_expanded = centroids_full[:, :, None, :].expand(B, N, M, D)
+        # Compute exclusion centroids for each utterance
+        # For each utterance, exclude it from its speaker's centroid
+        centroids_excl = (M * centroids_incl[:, None, :] - x) / (M - 1)
         
-        # Compute exclusion centroids (B, N, M, D)
-        centroids_excl = (M * centroids_expanded - x) / (M - 1)
-        centroids_excl = centroids_excl.view(B, N * M, D)  # (B, N*M, D)
-        centroids_excl = F.normalize(centroids_excl, p=2, dim=-1)
+        # Flatten: (N*M, D)
+        x_flat = x.view(N * M, D)
+        centroids_excl_flat = centroids_excl.view(N * M, D)
         
-        # Expand inclusion centroids to (B, N*M, N, D)
-        centroids_incl_expanded = centroids_full[:, None, :, :].expand(B, N*M, N, D)
+        # Compute similarity matrix: (N*M, N)
+        # For each utterance, compute similarity to all N centroids
+        sim_matrix = torch.matmul(x_flat, centroids_incl.T)  # (N*M, N)
         
-        # Create indices for each batch
-        speaker_ids = torch.arange(N, device=x.device).repeat_interleave(M)  # [0,0,1,1,2,2,...]
-        row_indices = torch.arange(N * M, device=x.device)
+        # Replace diagonal blocks with exclusion centroids
+        for j in range(N):
+            start_idx = j * M
+            end_idx = start_idx + M
+            sim_matrix[start_idx:end_idx, j] = torch.sum(
+                x_flat[start_idx:end_idx] * centroids_excl_flat[start_idx:end_idx],
+                dim=1
+            )
         
-        # Replace own-speaker centroids with exclusion centroids
-        centroids_final = centroids_incl_expanded.clone()
-        for b in range(B):
-            centroids_final[b, row_indices, speaker_ids] = centroids_excl[b]
+        # Scale and shift
+        sim_matrix = self.w * sim_matrix + self.b
         
-        # Compute cosine similarity (B, N*M, N)
-        cos_sim = torch.sum(x_flat[:, :, None, :] * centroids_final, dim=3)
+        # Create labels: each utterance belongs to its speaker
+        labels = torch.arange(N, device=x.device).repeat_interleave(M)
         
-        # Scale and bias
-        cos_sim = self.w * cos_sim + self.b
-        
-        # Compute loss for each batch sample
-        targets = speaker_ids.expand(B, -1)  # (B, N*M)
-        loss = F.cross_entropy(cos_sim.view(B * N * M, N), targets.reshape(-1))
+        # Cross-entropy loss
+        loss = F.cross_entropy(sim_matrix, labels)
         
         return loss
