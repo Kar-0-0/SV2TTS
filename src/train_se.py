@@ -172,7 +172,7 @@ model = SpeakerEncoder(
 loss_fn = GE2ELoss()
 
 optimizer = torch.optim.Adam([
-    {'params': model.parameters(), 'lr': 1e-3},
+    {'params': model.parameters(), 'lr': 1e-4},
     {'params': loss_fn.parameters(), 'lr': 1e-3}  # Changed from 1e-2 to 1e-3
 ])
 
@@ -207,10 +207,19 @@ def verify_speakers(model, audio1_path, audio2_path, threshold=0.7):
 model.train()
 for epoch in range(epochs):
     x_batch = dataset.sample_batch(n_speakers, n_utter)  # [64, 10, 160, 40]
-    x_batch = x_batch.to(device)
-    
+
+
     N, M, T, Z = x_batch.shape
+    x_batch = x_batch.to(device)
     x_batch = x_batch.view(N * M, T, Z) 
+    for i in range(N * M):
+        mean = x_batch[i].mean()
+        std = x_batch[i].std() + 1e-8
+        x_batch[i] = (x_batch[i] - mean) / std
+
+    if epoch == 0:
+        print(f"Normalized batch - mean: {x_batch.mean():.4f}, std: {x_batch.std():.4f}")
+        
     
     embeddings = model(x_batch)  # [640, 256]
     embeddings = embeddings.view(N, M, -1)
@@ -219,12 +228,11 @@ for epoch in range(epochs):
     
     optimizer.zero_grad()
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
-    torch.nn.utils.clip_grad_norm_(loss_fn.parameters(), max_norm=1.0)
     optimizer.step()
 
     if epoch % 100 == 0:
         print(f"Step {epoch}: Loss {loss.item():.4f}, w={loss_fn.w.item():.2f}, b={loss_fn.b.item():.2f}\n------------------------")
+        print(f"  Embedding sample: {embeddings[0, 0, :5]}")    
         with torch.no_grad():
             emb_norm = torch.norm(embeddings, dim=-1).mean()
             emb_std = embeddings.std()
@@ -237,7 +245,7 @@ for epoch in range(epochs):
 
         # Test with different speakers
         diff_speaker = verify_speakers(model, 'data/wav/id11245/1iOMOrqGesE/00005.wav',
-                                            'data/wav/id11248/_U-p_z1WI2E/00001.wav')
+                                            'data/wav/id11203/8AHKMsnyn0Q/00001.wav')
         print(f"Different speaker: {diff_speaker}")
         print("------------------------")    
         model.train()
