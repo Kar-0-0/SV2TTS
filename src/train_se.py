@@ -255,29 +255,24 @@ for epoch in range(epochs):
     optimizer.step()
 
     if epoch % 100 == 0:
-        print(f"Step {epoch}: Loss {loss.item():.4f}, w={loss_fn.w.item():.2f}, b={loss_fn.b.item():.2f}\n------------------------")
+        print(f"Step {2_000 + epoch}: Loss {loss.item():.4f}, w={loss_fn.w.item():.2f}, b={loss_fn.b.item():.2f}\n------------------------")
         print(f"  Embedding sample: {embeddings[0, 0, :5]}")    
         with torch.no_grad():
+            model.eval()
             emb_norm = torch.norm(embeddings, dim=-1).mean()
             emb_std = embeddings.std()
             print(f"  Embedding norm: {emb_norm:.4f}, std: {emb_std:.4f}")
 
-        # Test with same speaker
-        same_speaker = verify_speakers(
-            model,
-            'data/wav/id11245/1iOMOrqGesE/00004.wav', 
-            'data/wav/id11245/1iOMOrqGesE/00005.wav'
-        )
-        print(f"Same speaker: {same_speaker}")
+            # Test with same speaker
+            same_speaker = verify_speakers(model, 'data/wav/id11161/9-b6cfguVgI/00001.wav', 
+                                                'data/wav/id11161/zCoxj-QjqbE/00001.wav')
+            print(f"Same speaker: {same_speaker}")
 
-        # Test with different speakers
-        diff_speaker = verify_speakers(
-            model,
-            'data/wav/id11245/1iOMOrqGesE/00005.wav',
-            'data/wav/id11203/8AHKMsnyn0Q/00001.wav'
-        )
-        print(f"Different speaker: {diff_speaker}")
-        print("------------------------")    
+            # Test with different speakers
+            diff_speaker = verify_speakers(model, 'data/wav/id11240/cdZCw06aRE8/00001.wav',
+                                                'data/wav/id10989/SwqPzS1-aoc/00001.wav')
+            print(f"Different speaker: {diff_speaker}")
+            print("------------------------")   
         model.train()
 
     if epoch % 1000 == 0 and epoch > 0:
