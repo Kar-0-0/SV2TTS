@@ -8,6 +8,7 @@ from pathlib import Path
 from speaker_encoder import SpeakerEncoder, GE2ELoss
 
 
+
 file_path = 'data/wav/id10001/1zcIwhmdeo4/00001.wav'
 sample_rate = 16_000
 n_mels = 40
@@ -21,6 +22,7 @@ epochs = 100_000
 n_speakers = 32
 n_utter = 10
 learning_rate = 1e-4
+
 
 
 # load data
@@ -50,6 +52,7 @@ def wav_to_mel(file_path, sample_rate, n_mels, win_length, hop_length, n_fft):
     except Exception as e:
         # Return None for corrupted files
         return None
+
 
 
 class VoxCelebDataset(Dataset):
@@ -105,20 +108,33 @@ class VoxCelebDataset(Dataset):
             # Return zeros if corrupted
             return torch.zeros(self.target_frames, 40)
         
-        # Crop or pad to target_frames
+        # Crop or pad to target_frames (RANDOM for training)
         mel = self._adjust_length(mel)
         
         return mel.T  # Return [160, 40]
     
     def _adjust_length(self, mel):
+        # RANDOM crop for training
         _, frames = mel.shape
         
         if frames > self.target_frames:
-            # Randomly crop
             start = random.randint(0, frames - self.target_frames)
             mel = mel[:, start:start + self.target_frames]
         elif frames < self.target_frames:
-            # Pad with zeros
+            pad = self.target_frames - frames
+            mel = torch.nn.functional.pad(mel, (0, pad))
+        
+        return mel
+
+    def _adjust_length_eval(self, mel):
+        # DETERMINISTIC crop for evaluation
+        _, frames = mel.shape
+        
+        if frames > self.target_frames:
+            # center crop
+            start = (frames - self.target_frames) // 2
+            mel = mel[:, start:start + self.target_frames]
+        elif frames < self.target_frames:
             pad = self.target_frames - frames
             mel = torch.nn.functional.pad(mel, (0, pad))
         
@@ -157,10 +173,12 @@ class VoxCelebDataset(Dataset):
         return torch.stack(batch)  # [N, M, 160, 40]
 
 
+
 dataset = VoxCelebDataset(
     data_dir='data/wav',
     wav_to_mel_fn=lambda path: wav_to_mel(path, sample_rate, n_mels, win_length, hop_length, n_fft)
 )
+
 
 model = SpeakerEncoder(
     mel_bins=n_mels,
@@ -168,15 +186,20 @@ model = SpeakerEncoder(
     lstm_layers=lstm_layers,
     n_emb=n_emb 
 )
+model.load_state_dict(torch.load("checkpoint_step2000.pth"))
+
 
 loss_fn = GE2ELoss()
 
+
 optimizer = torch.optim.Adam([
     {'params': model.parameters(), 'lr': 1e-4},
-    {'params': loss_fn.parameters(), 'lr': 1e-3}  # Changed from 1e-2 to 1e-3
+    {'params': loss_fn.parameters(), 'lr': 1e-5}
 ])
 
+
 device = torch.device('cpu')
+
 
 def verify_speakers(model, audio1_path, audio2_path, threshold=0.7):
     model.eval()
@@ -190,9 +213,9 @@ def verify_speakers(model, audio1_path, audio2_path, threshold=0.7):
             print("Error: Could not load one or both audio files")
             return False
         
-        # Adjust length and prepare
-        mel1 = dataset._adjust_length(mel1).T.unsqueeze(0)  # [1, 160, 40]
-        mel2 = dataset._adjust_length(mel2).T.unsqueeze(0)  # [1, 160, 40]
+        # Adjust length and prepare (DETERMINISTIC for eval)
+        mel1 = dataset._adjust_length_eval(mel1).T.unsqueeze(0)  # [1, 160, 40]
+        mel2 = dataset._adjust_length_eval(mel2).T.unsqueeze(0)  # [1, 160, 40]
         
         # Get embeddings
         emb1 = model(mel1)  # [1, 256]
@@ -204,10 +227,10 @@ def verify_speakers(model, audio1_path, audio2_path, threshold=0.7):
         print(f"Similarity: {similarity:.4f}")
         return similarity > threshold
     
+
 model.train()
 for epoch in range(epochs):
     x_batch = dataset.sample_batch(n_speakers, n_utter)  # [64, 10, 160, 40]
-
 
     N, M, T, Z = x_batch.shape
     x_batch = x_batch.to(device)
@@ -220,14 +243,15 @@ for epoch in range(epochs):
     if epoch == 0:
         print(f"Normalized batch - mean: {x_batch.mean():.4f}, std: {x_batch.std():.4f}")
         
-    
     embeddings = model(x_batch)  # [640, 256]
     embeddings = embeddings.view(N, M, -1)
     
     loss = loss_fn(embeddings)
-    
+
     optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+    torch.nn.utils.clip_grad_norm_(loss_fn.parameters(), max_norm=0.5)
     optimizer.step()
 
     if epoch % 100 == 0:
@@ -239,19 +263,24 @@ for epoch in range(epochs):
             print(f"  Embedding norm: {emb_norm:.4f}, std: {emb_std:.4f}")
 
         # Test with same speaker
-        same_speaker = verify_speakers(model, 'data/wav/id11245/1iOMOrqGesE/00004.wav', 
-                                            'data/wav/id11245/1iOMOrqGesE/00005.wav')
+        same_speaker = verify_speakers(
+            model,
+            'data/wav/id11245/1iOMOrqGesE/00004.wav', 
+            'data/wav/id11245/1iOMOrqGesE/00005.wav'
+        )
         print(f"Same speaker: {same_speaker}")
 
         # Test with different speakers
-        diff_speaker = verify_speakers(model, 'data/wav/id11245/1iOMOrqGesE/00005.wav',
-                                            'data/wav/id11203/8AHKMsnyn0Q/00001.wav')
+        diff_speaker = verify_speakers(
+            model,
+            'data/wav/id11245/1iOMOrqGesE/00005.wav',
+            'data/wav/id11203/8AHKMsnyn0Q/00001.wav'
+        )
         print(f"Different speaker: {diff_speaker}")
         print("------------------------")    
         model.train()
-    if epoch % 5000 == 0 and epoch > 0:
-        torch.save(model.state_dict(), f'checkpoint_step{epoch}.pth')
+
+    if epoch % 1000 == 0 and epoch > 0:
+        torch.save(model.state_dict(), f'checkpoint_step{2_000 + epoch}.pth')
 
 torch.save(model.state_dict(), f'se_step_final.pth')
-
-
