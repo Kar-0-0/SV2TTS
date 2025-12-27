@@ -39,8 +39,8 @@ class SpeakerEncoder(nn.Module):
 class GE2ELoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.w = nn.Parameter(torch.tensor(15.0))
-        self.b = nn.Parameter(torch.tensor(-7.0))
+        self.w = nn.Parameter(torch.tensor(10.0))
+        self.b = nn.Parameter(torch.tensor(-5.0))
     
     def forward(self, x):
         # x: (N, M, D) - N speakers, M utterances, D embedding dim
