@@ -49,10 +49,9 @@ class GE2ELoss(nn.Module):
         centroids_incl = torch.mean(x, dim=1) # (N, D)
         
 
-        centroids_excl = (M * centroids_incl[:, None, :] - x) / (M - 1)
+        centroids_excl = (M * centroids_incl[:, None, :] - x) / (M - 1) # (N, M, D)
         
-        # Flatten: (N*M, D)
-        x_flat = x.view(N * M, D)
+        x_flat = x.view(N * M, D) # (N*M, D)
         centroids_excl_flat = centroids_excl.view(N * M, D)
 
         sim_matrix = torch.matmul(x_flat, centroids_incl.T)  # (N*M, N)
