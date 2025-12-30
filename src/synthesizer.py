@@ -2,24 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Architecture
-'''
-1. a recurrent sequence-to-sequence feature prediction network with
-attention which predicts a sequence of mel spectrogram frames from
-an input character sequence
-
-2. a modified version of WaveNet which generates time-domain waveform
-samples conditioned on the predicted mel spectrogram frames.
-'''
-
-# Encoder
-    # BiLSTM
-    # decoder hidden state at the previous time step as the query,
-    # and the encoder hidden states at all time steps as both the
-    # keys and values
-# Decoder
-    # Attention - Location Based Attention or Bahdanau Attention
-
 
 class Encoder(nn.Module):
     def __init__(
@@ -44,7 +26,7 @@ class Encoder(nn.Module):
 
         self.conv3 = nn.Conv2d(in_channels=n_filters, out_channels=n_filters, kernel_size=kernel_size, padding=(2, 0))
         self.bn3 = nn.BatchNorm2d(n_filters)
-        
+
         self.relu = nn.ReLU()
 
         self.bi_lstm = nn.LSTM(lstm_in, hidden_channels, lstm_layers, batch_first=True, bidirectional=True)
@@ -62,3 +44,41 @@ class Encoder(nn.Module):
         x = self.bi_lstm(x)
 
         return x
+
+
+class TemporalAttention(nn.Module):
+    def __init__(self, dh_state, eh_state, attn_dim, loc_kernel_size, loc_padding, pos_kernel_size, pos_padding):
+        super().__init__()
+        self.loc_conv = nn.Conv1d(1, attn_dim, loc_kernel_size, padding=loc_padding)
+        self.cum_conv = nn.Conv1d(1, 1, pos_kernel_size, padding=pos_padding)
+
+        self.attn_dim = attn_dim
+        self.qproj = nn.Linear(dh_state, attn_dim)
+        self.kvproj = nn.Linear(eh_state, attn_dim)
+
+        self.q = nn.Linear(attn_dim, attn_dim)
+        self.kv = nn.Linear(attn_dim, attn_dim*2)
+
+    def forward(self, s_t, h_enc, prev_attn, prev_energy):
+        prev_attn = prev_attn[:, None, :]
+        loc_feats = self.loc_conv(prev_attn).transpose(-2, -1).mean(-1) # (B, T)
+
+        prev_energy = prev_energy[:, None, :]
+        cum_feats = self.cum_conv(prev_energy) # (B, 1, T)
+        cum_feats = cum_feats.squeeze(1) # (B, T)
+
+        qproj = self.qproj(s_t) # (B, attn_dim)
+        kvproj = self.kvproj(h_enc) # (B, T, attn_dim)
+
+        q = self.q(qproj) # (B, attn_dim)
+
+        kv = self.kv(kvproj) # (B, T, attn_dim*2)
+        k, v = kv.split(self.attn_dim, dim=-1) # (B, T, attn_dim)
+
+        energy = (q @ k.transpose(-2, -1)) + loc_feats + cum_feats # (B, T)
+
+        a_t = F.softmax(energy, dim=-1)
+
+        context = a_t @ v # (B, attn_dim)
+
+        return context, a_t, prev_energy
