@@ -81,4 +81,18 @@ class TemporalAttention(nn.Module):
 
         context = a_t @ v # (B, attn_dim)
 
-        return context, a_t, prev_energy
+        return context, a_t, energy
+
+
+'''
+Decoder RNN (2-layer LSTM, 1024 hidden):
+Input per step: [prenet(prev_mel), context_t] → [B, 256 + attn_dim]
+Output: LSTM hidden → project to mel_dim (80)
+
+Autoregressive loop ~max_mel_frames:
+1. Prenet(previous mel frame or <sos>)
+2. Attention(s_t=decoder_hidden, h_enc, prev_attn, prev_energy) → context, a_t, energy
+3. Concat(prenet_out, context) → decoder LSTM input
+4. LSTM → new s_{t+1}
+5. Linear(mel_dim) → mel_pred
+'''
