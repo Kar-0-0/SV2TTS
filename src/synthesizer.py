@@ -43,7 +43,7 @@ class Encoder(nn.Module):
 
         x = self.bi_lstm(x)
 
-        return x
+        return x # (B, T, hidden_channels*2)
 
 
 class TemporalAttention(nn.Module):
@@ -93,20 +93,6 @@ class TemporalAttention(nn.Module):
         return context, a_t, energy
 
 
-'''
-Decoder RNN (2-layer LSTM, 1024 hidden):
-Input per step: [prenet(prev_mel), context_t] → [B, 256 + attn_dim]
-Output: LSTM hidden → project to mel_dim (80)
-
-Autoregressive loop ~max_mel_frames:
-1. Prenet(previous mel frame or <sos>)
-2. Attention(s_t=decoder_hidden, h_enc, prev_attn, prev_energy) → context, a_t, energy
-3. Concat(prenet_out, context) → decoder LSTM input
-4. LSTM → new s_{t+1}
-5. Linear(mel_dim) → mel_pred
-'''
-
-
 class PreNet(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
@@ -128,24 +114,22 @@ class PostNet(nn.Module):
             n_filters,
             kernel_size,
             padding,
-            n_dim
-
     ):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, n_filters, kernel_size, padding=padding)
-        self.bn1 = nn.BatchNorm2d(n_dim)
+        self.bn1 = nn.BatchNorm2d(n_filters)
 
         self.conv2 = nn.Conv2d(n_filters, n_filters, kernel_size, padding=padding)
-        self.bn2 = nn.BatchNorm2d(n_dim)
+        self.bn2 = nn.BatchNorm2d(n_filters)
 
         self.conv3 = nn.Conv2d(n_filters, n_filters, kernel_size, padding=padding)
-        self.bn3 = nn.BatchNorm2d(n_dim)
+        self.bn3 = nn.BatchNorm2d(n_filters)
 
         self.conv4 = nn.Conv2d(n_filters, n_filters, kernel_size, padding=padding)
-        self.bn4 = nn.BatchNorm2d(n_dim)
+        self.bn4 = nn.BatchNorm2d(n_filters)
 
         self.conv5 = nn.Conv2d(n_filters, in_channels, kernel_size, padding=padding)
-        self.bn5 = nn.BatchNorm2d(n_dim)
+        self.bn5 = nn.BatchNorm2d(in_channels)
 
         self.tanh = nn.Tanh()
     
@@ -181,7 +165,11 @@ class Decoder(nn.Module):
             batch_first=True
     ):
         super().__init__()
+        self.lstm_layers = lstm_layers
+        self.lstm_dim = lstm_dim
+
         self.pre_net = PreNet(pre_in, pre_out)
+
         self.temp_attn = TemporalAttention(
             dh_state,
             eh_state,
@@ -191,8 +179,10 @@ class Decoder(nn.Module):
             pos_kernel_size,
             pos_padding
         )
-        self.lstm = nn.LSTM(pre_in+attn_dim, lstm_dim, lstm_layers, batch_first=batch_first)
+
+        self.lstm = nn.LSTM(pre_out+attn_dim, lstm_dim, lstm_layers, batch_first=batch_first)
         self.mel_proj = nn.Linear(lstm_dim, mel_dim)
+
         self.post_net = PostNet(
             post_in,
             post_filters,
@@ -200,3 +190,43 @@ class Decoder(nn.Module):
             post_padding,
             mel_dim
         )
+
+    def forward(self, x, mel_seq):
+        device = x.device
+        B, t_enc, _ = x.shape
+        mel_out = torch.zeros_like(mel_seq, device=device)
+
+        for t in range(mel_seq.size(1)):
+            if t == 0:
+                h = torch.zeros(self.lstm_layers, B, self.lstm_dim, device=device)
+                c = torch.zeros(self.lstm_layers, B, self.lstm_dim, device=device)
+                s_t = h[-1]
+                h_enc = x
+
+                prev_attn = torch.ones((B, t_enc), device=device)
+                prev_attn = F.normalize(prev_attn, p=1, dim=-1) # uniform
+
+                prev_energy = torch.zeros((B, t_enc), device=device)
+
+            context, a_t, energy = self.temp_attn(s_t, h_enc, prev_attn, prev_energy)
+            prev_attn = a_t
+            prev_energy = energy
+            
+            mel_frame = mel_seq[:, t]
+            pre_out = self.pre_net(mel_frame) # (B, pre_in)
+            lstm_in = torch.cat([context, pre_out], dim=-1) # (B, attn_dim+pre_out)
+            lstm_in = lstm_in[:, None, :] # (B, 1, attn_dim+pre_out)
+
+            out, (h, c) = self.lstm(lstm_in, (h, c)) # out: (B, 1, lstm_dim)
+            s_t = out[:, 0] # (B, lstm_dim)
+            mel_frame = self.mel_proj(s_t) # (B, mel_dim)
+            mel_out[:, t] = mel_frame
+        
+        mel_4D = mel_out[:, None, :, :].transpose(-2, -1) # (B, 1, mel_dim, T)
+        mel_post_4d = self.post_net(mel_4D) # (B, 1, mel_dim, T)
+        mel_post = mel_post_4d.squeeze(1).transpose(1, 2) # (B, T, mel_dim)
+
+        mel_out_post = mel_out + mel_post
+
+        return mel_out, mel_out_post
+
