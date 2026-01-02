@@ -13,7 +13,9 @@ class Encoder(nn.Module):
             kernel_size, 
             hidden_channels,
             lstm_layers,
-            lstm_in
+            lstm_in,
+            batch_first=True,
+            bidirectional=False
     ):
         super().__init__()
         self.emb = nn.Embedding(vocab_size, n_emb)
@@ -29,7 +31,7 @@ class Encoder(nn.Module):
 
         self.relu = nn.ReLU()
 
-        self.bi_lstm = nn.LSTM(lstm_in, hidden_channels, lstm_layers, batch_first=True, bidirectional=True)
+        self.bi_lstm = nn.LSTM(lstm_in, hidden_channels, lstm_layers, batch_first=batch_first, bidirectional=bidirectional)
 
     def forward(self, x):
         x = self.emb(x)
@@ -49,7 +51,7 @@ class Encoder(nn.Module):
 class TemporalAttention(nn.Module):
     def __init__(
             self,
-            dh_state,
+            lstm_dim,
             eh_state,
             attn_dim,
             loc_kernel_size,
@@ -62,7 +64,7 @@ class TemporalAttention(nn.Module):
         self.cum_conv = nn.Conv1d(1, 1, pos_kernel_size, padding=pos_padding)
 
         self.attn_dim = attn_dim
-        self.qproj = nn.Linear(dh_state, attn_dim)
+        self.qproj = nn.Linear(lstm_dim, attn_dim)
         self.kvproj = nn.Linear(eh_state, attn_dim)
 
         self.q = nn.Linear(attn_dim, attn_dim)
@@ -148,7 +150,6 @@ class Decoder(nn.Module):
             self,
             pre_in,
             pre_out,
-            dh_state,
             eh_state,
             attn_dim,
             loc_kernel_size,
@@ -162,7 +163,8 @@ class Decoder(nn.Module):
             post_filters,
             post_kernel,
             post_padding,
-            batch_first=True
+            batch_first=True,
+            bidirectional=False
     ):
         super().__init__()
         self.lstm_layers = lstm_layers
@@ -171,7 +173,7 @@ class Decoder(nn.Module):
         self.pre_net = PreNet(pre_in, pre_out)
 
         self.temp_attn = TemporalAttention(
-            dh_state,
+            lstm_dim,
             eh_state,
             attn_dim,
             loc_kernel_size,
@@ -180,7 +182,7 @@ class Decoder(nn.Module):
             pos_padding
         )
 
-        self.lstm = nn.LSTM(pre_out+attn_dim, lstm_dim, lstm_layers, batch_first=batch_first)
+        self.lstm = nn.LSTM(pre_out+attn_dim, lstm_dim, lstm_layers, batch_first=batch_first, bidirectional=bidirectional)
         self.mel_proj = nn.Linear(lstm_dim, mel_dim)
 
         self.post_net = PostNet(
@@ -213,7 +215,7 @@ class Decoder(nn.Module):
             prev_energy = energy
             
             mel_frame = mel_seq[:, t]
-            pre_out = self.pre_net(mel_frame) # (B, pre_in)
+            pre_out = self.pre_net(mel_frame) # (B, pre_out)
             lstm_in = torch.cat([context, pre_out], dim=-1) # (B, attn_dim+pre_out)
             lstm_in = lstm_in[:, None, :] # (B, 1, attn_dim+pre_out)
 
@@ -229,4 +231,68 @@ class Decoder(nn.Module):
         mel_out_post = mel_out + mel_post
 
         return mel_out, mel_out_post
+
+
+class Synthesizer(nn.Module):
+    def __init__(
+            self,
+            pre_in,
+            pre_out,
+            eh_state,
+            attn_dim,
+            loc_kernel_size,
+            loc_padding,
+            pos_kernel_size,
+            pos_padding,
+            lstm_dim,
+            lstm_layers,
+            mel_dim,
+            post_in,
+            post_filters,
+            post_kernel,
+            post_padding,
+            vocab_size,
+            enc_emb,
+            enc_channels,
+            enc_filters,
+            enc_kernel_size, 
+            enc_hidden_channels,
+            enc_lstm_layers,
+            enc_lstm_in,
+            batch_first=True,
+            enc_bidirectional=False,
+            dec_bidirectional=False
+    ):
+        self.encoder = Encoder(
+            vocab_size,
+            enc_emb,
+            enc_channels,
+            enc_filters,
+            enc_kernel_size, 
+            enc_hidden_channels,
+            enc_lstm_layers,
+            enc_lstm_in,
+            batch_first=batch_first
+            bidirectional=enc_bidirectional
+        )
+
+        self.decoder = Decoder(
+            pre_in,
+            pre_out,
+            eh_state,
+            attn_dim,
+            loc_kernel_size,
+            loc_padding,
+            pos_kernel_size,
+            pos_padding,
+            lstm_dim,
+            lstm_layers,
+            mel_dim,
+            post_in,
+            post_filters,
+            post_kernel,
+            post_padding,
+            batch_first=batch_first,
+            dec_bidirectional=dec_bidirectional
+        )
 
